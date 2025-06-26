@@ -1,0 +1,22 @@
+{
+  "name": "local-llm-translator-extension",
+  "version": "1.0.0",
+  "description": "Browser extension for translating web pages using local LLM",
+  "private": true,
+  "scripts": {
+    "build": "echo 'Extension ready for packaging!'",
+    "pack": "node -e \"const fs=require('fs');const path=require('path');const archiver=require('archiver');const output=fs.createWriteStream('local-llm-translator-extension.zip');const archive=archiver('zip',{zlib:{level:9}});output.on('close',()=>console.log('Extension packed successfully!'));archive.on('error',err=>{throw err;});archive.pipe(output);const filesToInclude=['manifest.json','popup.html','popup.css','popup.js','content.js','content.css','background.js','icons/'];filesToInclude.forEach(file=>{if(fs.existsSync(file)){if(fs.statSync(file).isDirectory()){archive.directory(file,file);}else{archive.file(file,{name:file});}}});archive.finalize();\"",
+    "dev": "echo 'Load extension in browser developer mode'"
+  },
+  "keywords": [
+    "browser-extension",
+    "translation",
+    "llm",
+    "local-ai"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "devDependencies": {
+    "archiver": "^6.0.1"
+  }
+}
