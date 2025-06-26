@@ -96,10 +96,36 @@ ${text}`;
       });
     }
 
-    if (!response.ok) throw new Error('Translation failed');
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`[LocalLLMTranslator] translateSelection: API error (Status: ${response.status}):`, errorText);
+      let detail = errorText.substring(0, 500);
+      try {
+        const errorJson = JSON.parse(errorText);
+        if (errorJson.error) {
+          detail = typeof errorJson.error === 'object' ? JSON.stringify(errorJson.error) : String(errorJson.error);
+        } else if (errorJson.message) {
+          detail = errorJson.message;
+        }
+      } catch (e) { /* Not JSON, use raw snippet */ }
+      throw new Error(`Translation API error: ${response.status} ${response.statusText}. Detail: ${detail}`);
+    }
 
-    const data = await response.json();
-    const translatedText = data.response || data.choices[0].message.content;
+    const responseText = await response.text();
+    let data;
+    try {
+      data = JSON.parse(responseText);
+    } catch (e) {
+      console.error('[LocalLLMTranslator] translateSelection: Failed to parse JSON response. Raw:', responseText.substring(0, 500));
+      throw new Error(`Failed to parse JSON response from translation API. Snippet: ${responseText.substring(0,500)}`);
+    }
+
+    const translatedText = data.response || (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content);
+
+    if (typeof translatedText !== 'string') {
+      console.error('[LocalLLMTranslator] translateSelection: Could not extract translated text from API response. Data:', data);
+      throw new Error('Could not extract translated text from API response.');
+    }
 
     // Show translation in a tooltip
     const tooltip = document.createElement('div');

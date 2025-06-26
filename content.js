@@ -1,14 +1,39 @@
 // Content script for webpage translation
 (function() {
-  'use strict';
+  'use_strict';
 
+  // Stores original node values and references for reversion
+  // Key: string (generated parent element ID)
+  // Value: Array of objects like { node: Text, originalValue: string }
   let originalContent = new Map();
   let isTranslating = false;
   let translationConfig = null;
+  let nextElementId = 0; // Counter for generating unique IDs
+  let translationAbortedByUser = false;
+
+  // Listen for abort message from popup
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.type === 'ABORT_TRANSLATION') {
+      console.log('[LocalLLMTranslator] Received ABORT_TRANSLATION signal.');
+      translationAbortedByUser = true;
+      // Optionally, send an ack back to popup if needed
+      // sendResponse({status: "Abort signal received by content script"});
+    }
+    return true; // Keep message channel open for other listeners or async response
+  });
 
   // Initialize translation functionality
   window.startTranslation = async function(config) {
     console.log('[LocalLLMTranslator] startTranslation called with config:', config);
+    // Clear previous translation state before starting a new one
+    if (originalContent.size > 0) {
+        console.log('[LocalLLMTranslator] Clearing previous translation artifacts before new translation.');
+        revertPage(false); // Revert without refresh confirmation
+    }
+    originalContent.clear();
+    nextElementId = 0;
+    translationAbortedByUser = false; // Reset abort flag for new translation
+
     translationConfig = config;
     await translatePage();
   };
@@ -16,7 +41,7 @@
   // Revert translation functionality
   window.revertTranslation = function() {
     console.log('[LocalLLMTranslator] revertTranslation called');
-    revertPage();
+    revertPage(true); // Revert with refresh confirmation
   };
 
   async function translatePage() {
@@ -65,7 +90,17 @@
 
       console.log('[LocalLLMTranslator] Starting batch processing...');
       for (const batch of batches) {
-        await processBatch(batch, completedBatches + 1, batches.length); // Pass batch numbers for logging
+        if (translationAbortedByUser) {
+          console.log('[LocalLLMTranslator] Translation aborted by user during batch processing.');
+          chrome.runtime.sendMessage({ type: 'TRANSLATION_ERROR', error: 'Translation stopped by user.' });
+          break;
+        }
+        await processBatch(batch, completedBatches + 1, batches.length);
+        if (translationAbortedByUser) { // Check again after await, as processBatch itself could be long
+          console.log('[LocalLLMTranslator] Translation aborted by user after processBatch.');
+          chrome.runtime.sendMessage({ type: 'TRANSLATION_ERROR', error: 'Translation stopped by user.' });
+          break;
+        }
         completedBatches++;
         
         const progress = 20 + (completedBatches / batches.length) * 70;
@@ -75,23 +110,31 @@
           message: `Translated ${completedBatches} of ${batches.length} batches...`
         });
       }
-      console.log('[LocalLLMTranslator] All batches processed.');
 
-      chrome.runtime.sendMessage({
-        type: 'TRANSLATION_COMPLETE',
-        progress: 100
-      });
-      console.log('[LocalLLMTranslator] Translation complete message sent.');
+      if (translationAbortedByUser) {
+        console.log('[LocalLLMTranslator] Finished processing due to user abort.');
+      } else {
+        console.log('[LocalLLMTranslator] All batches processed.');
+        chrome.runtime.sendMessage({
+          type: 'TRANSLATION_COMPLETE',
+          progress: 100
+        });
+        console.log('[LocalLLMTranslator] Translation complete message sent.');
+      }
 
     } catch (error) {
       console.error('[LocalLLMTranslator] Translation error in translatePage:', error);
-      chrome.runtime.sendMessage({
-        type: 'TRANSLATION_ERROR',
-        error: error.message
-      });
+      // Avoid sending another error if already aborted
+      if (!translationAbortedByUser) {
+        chrome.runtime.sendMessage({
+          type: 'TRANSLATION_ERROR',
+          error: error.message
+        });
+      }
     } finally {
       console.log('[LocalLLMTranslator] translatePage finished. Resetting isTranslating flag.');
       isTranslating = false;
+      // translationAbortedByUser is reset at the start of a new translation
     }
   }
 
@@ -145,8 +188,18 @@
     console.log(`[LocalLLMTranslator] processBatch: Combined text for batch ${batchNum}:`, combinedText);
 
     try {
+      if (translationAbortedByUser) {
+        console.log(`[LocalLLMTranslator] Skipping translateText call for batch ${batchNum} due to user abort.`);
+        return; // Exit batch processing if aborted
+      }
       console.log(`[LocalLLMTranslator] processBatch: Calling translateText for batch ${batchNum}...`);
       const translatedText = await translateText(combinedText);
+
+      if (translationAbortedByUser) {
+        console.log(`[LocalLLMTranslator] Discarding translation results for batch ${batchNum} due to user abort.`);
+        return; // Don't process results if aborted during await
+      }
+
       console.log(`[LocalLLMTranslator] processBatch: Raw translated text for batch ${batchNum}:`, translatedText);
 
       const translatedParts = translatedText.split('\n---\n');
@@ -157,23 +210,36 @@
       }
 
       // Apply translations
-      elements.forEach((element, index) => {
+      elements.forEach((textNode, index) => { // element is a Text node
         if (translatedParts[index] && translatedParts[index].trim()) {
-          const originalText = element.textContent;
+          const originalNodeValue = textNode.nodeValue;
           const translatedFragment = translatedParts[index].trim();
-          console.log(`[LocalLLMTranslator] processBatch: Applying translation to element ${index} in batch ${batchNum}: "${originalText}" -> "${translatedFragment}"`);
+          console.log(`[LocalLLMTranslator] processBatch: Applying translation to text node ${index} in batch ${batchNum}: "${originalNodeValue}" -> "${translatedFragment}"`);
 
-          // Store original content
-          const elementId = generateElementId(element); // Assuming this is deterministic enough for a short period
-          originalContent.set(elementId, originalText);
-          
-          // Apply translation
-          element.textContent = translatedFragment;
-          
-          // Add visual indicator
-          addTranslationIndicator(element.parentElement);
+          const parentEl = textNode.parentElement;
+          if (parentEl) {
+            let parentId = parentEl.getAttribute('data-llm-translator-id');
+            if (!parentId) {
+              parentId = `llm-translator-el-${nextElementId++}`;
+              parentEl.setAttribute('data-llm-translator-id', parentId);
+            }
+
+            if (!originalContent.has(parentId)) {
+              originalContent.set(parentId, []);
+            }
+            // Store the text node itself and its original value
+            originalContent.get(parentId).push({ node: textNode, originalValue: originalNodeValue });
+
+            // Apply translation
+            textNode.nodeValue = translatedFragment;
+
+            // Add visual indicator to the parent element
+            addTranslationIndicator(parentEl);
+          } else {
+            console.warn(`[LocalLLMTranslator] processBatch: Text node ${index} in batch ${batchNum} has no parent element. Skipping.`);
+          }
         } else {
-          console.warn(`[LocalLLMTranslator] processBatch: No valid translation for element ${index} in batch ${batchNum}. Original: "${element.textContent.trim()}"`);
+          console.warn(`[LocalLLMTranslator] processBatch: No valid translation for text node ${index} in batch ${batchNum}. Original: "${textNode.nodeValue.trim()}"`);
         }
       });
       console.log(`[LocalLLMTranslator] processBatch: Finished applying translations for batch ${batchNum}.`);
@@ -188,6 +254,11 @@
     console.log('[LocalLLMTranslator] translateText: Starting with text:', text);
     const { llmUrl, model, targetLanguage } = translationConfig;
     console.log('[LocalLLMTranslator] translateText: Config:', { llmUrl, model, targetLanguage });
+
+    if (translationAbortedByUser) {
+      console.log('[LocalLLMTranslator] translateText: Aborting before fetch due to user signal.');
+      throw new Error("Translation aborted by user before API call.");
+    }
 
     const prompt = `Translate the following text to ${targetLanguage}. Preserve the original formatting and structure. Only return the translated text, nothing else. If there are multiple sections separated by "---", translate each section separately and maintain the "---" separators.
 
@@ -238,8 +309,20 @@ ${text}`;
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`[LocalLLMTranslator] translateText: API error response text from ${apiType}:`, errorText);
-        throw new Error(`Translation API error: ${response.status} ${response.statusText}. Response: ${errorText}`);
+        console.error(`[LocalLLMTranslator] translateText: API error response text from ${apiType} (Status: ${response.status}):`, errorText);
+        // Try to parse to see if it's a structured error, otherwise use raw text.
+        let detail = errorText.substring(0, 500); // Limit length
+        try {
+          const errorJson = JSON.parse(errorText);
+          if (errorJson.error) { // Common pattern for Ollama, OpenAI
+            detail = typeof errorJson.error === 'object' ? JSON.stringify(errorJson.error) : String(errorJson.error);
+          } else if (errorJson.message) { // Another common pattern
+            detail = errorJson.message;
+          }
+        } catch (e) {
+          // Not JSON or unexpected structure, stick with truncated raw text
+        }
+        throw new Error(`Translation API error: ${response.status} ${response.statusText}. Detail: ${detail}`);
       }
     } catch (error) {
       clearTimeout(timeoutId); // Clear timeout if fetch itself throws an error (e.g., network error, aborted)
@@ -259,8 +342,8 @@ ${text}`;
       data = JSON.parse(responseText);
       console.log(`[LocalLLMTranslator] translateText: Parsed JSON data from ${apiType}:`, data);
     } catch (e) {
-      console.error(`[LocalLLMTranslator] translateText: Failed to parse JSON response from ${apiType}. Error:`, e);
-      throw new Error(`Failed to parse JSON response from translation API. Response: ${responseText}`);
+      console.error(`[LocalLLMTranslator] translateText: Failed to parse JSON response from ${apiType}. Error:`, e, "Raw response:", responseText);
+      throw new Error(`Failed to parse JSON response from translation API. Response snippet: ${responseText.substring(0, 500)}`);
     }
     
     // Extract translated text based on API format
@@ -281,51 +364,69 @@ ${text}`;
     return translatedText.trim();
   }
 
-  function generateElementId(element) {
-    return `translate_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  }
+  // Removed generateElementId as it's no longer used with the new revert logic
 
   function addTranslationIndicator(element) {
-    if (!element.hasAttribute('data-translated')) {
-      element.setAttribute('data-translated', 'true');
-      element.style.background = 'linear-gradient(90deg, rgba(102, 126, 234, 0.1) 0%, rgba(118, 75, 162, 0.1) 100%)';
-      element.style.borderLeft = '3px solid #667eea';
-      element.style.paddingLeft = '8px';
-      element.style.transition = 'all 0.3s ease';
+    // Ensure element is a valid HTML element
+    if (!(element instanceof HTMLElement)) return;
+
+    if (!element.hasAttribute('data-translated-indicator')) {
+      element.setAttribute('data-translated-indicator', 'true');
+      // It's generally better to use classes for styling, but for simplicity of
+      // this script, direct style manipulation is kept.
+      // Consider moving these to content.css if styles become complex.
+      element.style.setProperty('background', 'linear-gradient(90deg, rgba(102, 126, 234, 0.1) 0%, rgba(118, 75, 162, 0.1) 100%)', 'important');
+      element.style.setProperty('border-left', '3px solid #667eea', 'important');
+      element.style.setProperty('padding-left', '8px', 'important');
+      element.style.setProperty('transition', 'all 0.3s ease', 'important');
     }
   }
 
-  function revertPage() {
-    // Remove all translation indicators
-    const translatedElements = document.querySelectorAll('[data-translated="true"]');
-    translatedElements.forEach(el => {
-      el.removeAttribute('data-translated');
-      el.style.background = '';
-      el.style.borderLeft = '';
-      el.style.paddingLeft = '';
-      el.style.transition = '';
-    });
+  function removeTranslationIndicator(element) {
+    if (!(element instanceof HTMLElement)) return;
 
-    // Restore original content
-    originalContent.forEach((originalText, elementId) => {
-      // This is a simplified revert - in a real implementation,
-      // you'd need to store more detailed element references
-      const elements = getTranslatableElements();
-      elements.forEach(el => {
-        if (originalContent.has(generateElementId(el))) {
-          el.textContent = originalText;
-        }
-      });
-    });
+    if (element.hasAttribute('data-translated-indicator')) {
+      element.removeAttribute('data-translated-indicator');
+      element.style.background = '';
+      element.style.borderLeft = '';
+      element.style.paddingLeft = '';
+      element.style.transition = '';
+    }
+  }
 
-    originalContent.clear();
+  function revertPage(showRefreshConfirm = true) {
+    console.log('[LocalLLMTranslator] Reverting page content...');
     
-    // Refresh the page as a fallback
-    setTimeout(() => {
-      if (confirm('Would you like to refresh the page to fully restore the original content?')) {
-        location.reload();
+    originalContent.forEach((nodeEntries, parentId) => {
+      const parentEl = document.querySelector(`[data-llm-translator-id="${parentId}"]`);
+      if (parentEl) {
+        nodeEntries.forEach(entry => {
+          // Check if the node is still part of the parent element
+          if (entry.node && parentEl.contains(entry.node)) {
+            entry.node.nodeValue = entry.originalValue;
+          } else {
+            console.warn(`[LocalLLMTranslator] Original node for parentId ${parentId} is no longer in the expected parent or document.`);
+          }
+        });
+        removeTranslationIndicator(parentEl);
+        parentEl.removeAttribute('data-llm-translator-id');
+      } else {
+        console.warn(`[LocalLLMTranslator] Parent element with ID ${parentId} not found during revert.`);
       }
-    }, 1000);
+    });
+
+    console.log(`[LocalLLMTranslator] Cleared ${originalContent.size} stored original content entries.`);
+    originalContent.clear();
+    nextElementId = 0; // Reset ID counter for next translation
+
+    if (showRefreshConfirm) {
+      // Refresh the page as a fallback
+      setTimeout(() => {
+        if (confirm('Page content has been reverted. Would you like to refresh the page to ensure full restoration (e.g., for scripts or complex elements)?')) {
+          location.reload();
+        }
+      }, 500); // Short delay to allow user to see the revert before confirm
+    }
   }
 
 })();
