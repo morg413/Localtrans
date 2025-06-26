@@ -74,10 +74,12 @@ class TranslatorPopup extends Component {
       connectionStatus: null, // 'success', 'error', or null
       progress: 0,
       status: null,
-      customLanguage: ''
+      customLanguage: '',
+      showStopButton: false // New state for stop button visibility
     };
     
     this.loadSettings();
+    this.messageListener = null; // To keep track of the listener
   }
 
   async loadSettings() {
@@ -91,7 +93,8 @@ class TranslatorPopup extends Component {
         model: result.model || 'llama2',
         targetLanguage: result.targetLanguage || 'Spanish',
         customLanguage: result.customLanguage || '',
-        connectionStatus: result.connectionStatus || null
+        connectionStatus: result.connectionStatus || null,
+        // Do not reset showStopButton on load, it's transient
       });
     } catch (error) {
       console.error('Error loading settings:', error);
@@ -178,7 +181,8 @@ class TranslatorPopup extends Component {
     this.setState({ 
       isTranslating: true, 
       progress: 0,
-      status: { type: 'info', message: 'Starting translation...' }
+      status: { type: 'info', message: 'Starting translation...' },
+      showStopButton: true
     });
 
     try {
@@ -187,11 +191,14 @@ class TranslatorPopup extends Component {
 
       // Get current tab
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab || !tab.id) {
+        throw new Error("Could not get active tab information.");
+      }
       
       // Inject content script and start translation
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        func: this.initializeTranslation,
+        func: this.initializeTranslation, // This is a global function in content.js
         args: [{
           llmUrl: this.state.llmUrl,
           model: this.state.model,
@@ -201,19 +208,31 @@ class TranslatorPopup extends Component {
       });
 
       // Listen for progress updates
-      this.listenForProgress();
+      this.listenForProgress(tab.id);
 
     } catch (error) {
       console.error('Translation error:', error);
       this.setState({ 
         isTranslating: false,
-        status: { type: 'error', message: 'Translation failed: ' + error.message }
+        status: { type: 'error', message: 'Translation failed: ' + error.message },
+        showStopButton: false
       });
     }
   }
 
-  listenForProgress() {
-    const listener = (message) => {
+  listenForProgress(tabId) {
+    // Remove existing listener if any, to avoid duplicates
+    if (this.messageListener && chrome.runtime.onMessage.hasListener(this.messageListener)) {
+      chrome.runtime.onMessage.removeListener(this.messageListener);
+    }
+
+    this.messageListener = (message, sender) => {
+      // Ensure message is from the content script of the tab we are translating
+      if (sender.tab && sender.tab.id !== tabId && message.type !== 'TRANSLATION_ERROR_GLOBAL') { // TRANSLATION_ERROR_GLOBAL could be from background
+          // console.log("Popup: Ignoring message from other tab", sender.tab.id, message);
+          return true;
+      }
+
       if (message.type === 'TRANSLATION_PROGRESS') {
         this.setState({ 
           progress: message.progress,
@@ -223,21 +242,25 @@ class TranslatorPopup extends Component {
         this.setState({ 
           isTranslating: false,
           progress: 100,
-          status: { type: 'success', message: 'Translation completed!' }
+          status: { type: 'success', message: 'Translation completed!' },
+          showStopButton: false
         });
-        chrome.runtime.onMessage.removeListener(listener);
+        if (this.messageListener) chrome.runtime.onMessage.removeListener(this.messageListener);
       } else if (message.type === 'TRANSLATION_ERROR') {
         this.setState({ 
           isTranslating: false,
-          status: { type: 'error', message: message.error }
+          status: { type: 'error', message: message.error },
+          showStopButton: false
         });
-        chrome.runtime.onMessage.removeListener(listener);
+        if (this.messageListener) chrome.runtime.onMessage.removeListener(this.messageListener);
       }
+      return true; // Keep channel open for other listeners
     };
 
-    chrome.runtime.onMessage.addListener(listener);
+    chrome.runtime.onMessage.addListener(this.messageListener);
   }
 
+  // This function is executed in the context of the content script
   initializeTranslation(config) {
     window.startTranslation(config);
   }
@@ -245,6 +268,9 @@ class TranslatorPopup extends Component {
   async revertTranslation() {
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab || !tab.id) {
+        throw new Error("Could not get active tab information for revert.");
+      }
       
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
@@ -256,7 +282,34 @@ class TranslatorPopup extends Component {
       });
     } catch (error) {
       this.setState({ 
-        status: { type: 'error', message: 'Failed to revert page' }
+        status: { type: 'error', message: 'Failed to revert page: ' + error.message }
+      });
+    }
+  }
+
+  async stopTranslation() {
+    console.log("Stop translation button clicked");
+    this.setState({
+      status: { type: 'info', message: 'Attempting to stop translation...' },
+      // isTranslating: false, // Keep true until confirmed stopped by content script or timeout
+      showStopButton: false // Hide stop button immediately to prevent multiple clicks
+    });
+
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab && tab.id) {
+        chrome.tabs.sendMessage(tab.id, { type: 'ABORT_TRANSLATION' });
+      } else {
+        throw new Error("Active tab not found to send abort signal.");
+      }
+      // The content script will send a TRANSLATION_ERROR message if successfully stopped.
+      // Or, translation might complete before stop signal is fully processed.
+    } catch (error) {
+      console.error("Error sending stop translation message:", error);
+      this.setState({
+        status: { type: 'error', message: 'Error trying to stop: ' + error.message },
+        isTranslating: false, // Assume it might not have stopped
+        showStopButton: false
       });
     }
   }
@@ -264,7 +317,7 @@ class TranslatorPopup extends Component {
   render() {
     const { 
       llmUrl, model, targetLanguage, isTranslating, isTestingConnection, 
-      connectionStatus, progress, status, customLanguage 
+      connectionStatus, progress, status, customLanguage, showStopButton
     } = this.state;
 
     const container = this.createElement('div', { className: 'popup-container' });
@@ -415,7 +468,16 @@ class TranslatorPopup extends Component {
       onClick: () => this.revertTranslation()
     }, '↶ Revert');
 
+    const stopBtn = this.createElement('button', {
+        className: 'btn btn-danger',
+        onClick: () => this.stopTranslation(),
+        style: `display: ${showStopButton ? 'inline-flex' : 'none'};` // Show only when showStopButton is true
+    }, '🛑 Stop Translation');
+
     controlsContainer.appendChild(translateBtn);
+    if (showStopButton) { // Conditionally add to DOM, or just control display style
+        controlsContainer.appendChild(stopBtn);
+    }
     controlsContainer.appendChild(revertBtn);
     content.appendChild(controlsContainer);
 
