@@ -7,7 +7,9 @@ class Component {
   }
 
   setState(newState) {
+    const oldState = { ...this.state };
     this.state = { ...this.state, ...newState };
+    console.log('[LocalLLMTranslator Popup DEBUG] setState: State changed. Old state:', JSON.stringify(oldState, null, 2), 'New state:', JSON.stringify(this.state, null, 2));
     this.render();
   }
 
@@ -77,16 +79,19 @@ class TranslatorPopup extends Component {
       customLanguage: '',
       showStopButton: false // New state for stop button visibility
     };
+    console.log('[LocalLLMTranslator Popup DEBUG] Initializing TranslatorPopup. Initial state:', JSON.stringify(this.state, null, 2));
     
     this.loadSettings();
     this.messageListener = null; // To keep track of the listener
   }
 
   async loadSettings() {
+    console.log('[LocalLLMTranslator Popup DEBUG] loadSettings: Attempting to load settings from chrome.storage.sync.');
     try {
       const result = await chrome.storage.sync.get([
         'llmUrl', 'model', 'targetLanguage', 'customLanguage', 'connectionStatus'
       ]);
+      console.log('[LocalLLMTranslator Popup DEBUG] loadSettings: Successfully loaded settings:', JSON.stringify(result, null, 2));
       
       this.setState({
         llmUrl: result.llmUrl || 'http://localhost:11434',
@@ -97,11 +102,18 @@ class TranslatorPopup extends Component {
         // Do not reset showStopButton on load, it's transient
       });
     } catch (error) {
-      console.error('Error loading settings:', error);
+      console.error('[LocalLLMTranslator Popup DEBUG] loadSettings: Error loading settings:', error);
     }
   }
 
   async saveSettings() {
+    console.log('[LocalLLMTranslator Popup DEBUG] saveSettings: Attempting to save settings:', JSON.stringify({
+      llmUrl: this.state.llmUrl,
+      model: this.state.model,
+      targetLanguage: this.state.targetLanguage,
+      customLanguage: this.state.customLanguage,
+      connectionStatus: this.state.connectionStatus
+    }, null, 2));
     try {
       await chrome.storage.sync.set({
         llmUrl: this.state.llmUrl,
@@ -110,46 +122,57 @@ class TranslatorPopup extends Component {
         customLanguage: this.state.customLanguage,
         connectionStatus: this.state.connectionStatus
       });
+      console.log('[LocalLLMTranslator Popup DEBUG] saveSettings: Settings saved successfully.');
     } catch (error) {
-      console.error('Error saving settings:', error);
+      console.error('[LocalLLMTranslator Popup DEBUG] saveSettings: Error saving settings:', error);
     }
   }
 
   async testConnection() {
+    console.log('[LocalLLMTranslator Popup DEBUG] testConnection: Starting connection test. Current URL:', this.state.llmUrl);
     this.setState({ 
       isTestingConnection: true,
       status: { type: 'info', message: 'Testing connection...' } 
     });
     
+    let endpointTested = '';
     try {
       let response;
       
       // Try different endpoints based on URL
       if (this.state.llmUrl.includes('localhost:11434') || this.state.llmUrl.includes('ollama')) {
         // Test Ollama API
-        response = await fetch(`${this.state.llmUrl}/api/tags`, {
+        endpointTested = `${this.state.llmUrl}/api/tags`;
+        console.log('[LocalLLMTranslator Popup DEBUG] testConnection: Testing Ollama API endpoint:', endpointTested);
+        response = await fetch(endpointTested, {
           method: 'GET',
           headers: { 'Content-Type': 'application/json' }
         });
       } else {
         // Test OpenAI-compatible API with a simple request
-        response = await fetch(`${this.state.llmUrl}/v1/models`, {
+        endpointTested = `${this.state.llmUrl}/v1/models`;
+        console.log('[LocalLLMTranslator Popup DEBUG] testConnection: Testing OpenAI-compatible API endpoint:', endpointTested);
+        response = await fetch(endpointTested, {
           method: 'GET',
           headers: { 'Content-Type': 'application/json' }
         });
       }
+      console.log('[LocalLLMTranslator Popup DEBUG] testConnection: Response received from', endpointTested, 'Status:', response.status, 'OK:', response.ok);
 
       if (response.ok) {
         this.setState({ 
           connectionStatus: 'success',
           status: { type: 'success', message: 'Connection successful! You can now translate pages.' } 
         });
+        console.log('[LocalLLMTranslator Popup DEBUG] testConnection: Connection successful for endpoint:', endpointTested);
         await this.saveSettings();
       } else {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        const errorText = await response.text();
+        console.error('[LocalLLMTranslator Popup DEBUG] testConnection: Connection failed for endpoint:', endpointTested, 'Status:', response.status, 'Response text:', errorText);
+        throw new Error(`HTTP ${response.status}: ${response.statusText}. Response: ${errorText.substring(0,100)}`);
       }
     } catch (error) {
-      console.error('Connection test error:', error);
+      console.error('[LocalLLMTranslator Popup DEBUG] testConnection: Error during connection test to', endpointTested, 'Error:', error);
       this.setState({ 
         connectionStatus: 'error',
         status: { 
@@ -157,8 +180,9 @@ class TranslatorPopup extends Component {
           message: `Connection failed: ${error.message}. Make sure your LLM server is running.` 
         } 
       });
-      await this.saveSettings();
+      await this.saveSettings(); // Save the error status
     } finally {
+      console.log('[LocalLLMTranslator Popup DEBUG] testConnection: Finished connection test.');
       this.setState({ isTestingConnection: false });
     }
   }
@@ -176,7 +200,11 @@ class TranslatorPopup extends Component {
   }
 
   async translatePage() {
-    if (this.state.isTranslating || !this.isTranslateButtonEnabled()) return;
+    console.log('[LocalLLMTranslator Popup DEBUG] translatePage: Called. Current state:', JSON.stringify(this.state, null, 2));
+    if (this.state.isTranslating || !this.isTranslateButtonEnabled()) {
+      console.log('[LocalLLMTranslator Popup DEBUG] translatePage: Exiting, already translating or button disabled.');
+      return;
+    }
 
     this.setState({ 
       isTranslating: true, 
@@ -184,34 +212,43 @@ class TranslatorPopup extends Component {
       status: { type: 'info', message: 'Starting translation...' },
       showStopButton: true
     });
+    console.log('[LocalLLMTranslator Popup DEBUG] translatePage: Set state to translating. New state:', JSON.stringify(this.state, null, 2));
 
     try {
       // Save current settings
+      console.log('[LocalLLMTranslator Popup DEBUG] translatePage: Saving settings before translation.');
       await this.saveSettings();
 
       // Get current tab
+      console.log('[LocalLLMTranslator Popup DEBUG] translatePage: Querying for active tab.');
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab || !tab.id) {
+        console.error("[LocalLLMTranslator Popup DEBUG] translatePage: Could not get active tab information.");
         throw new Error("Could not get active tab information.");
       }
+      console.log('[LocalLLMTranslator Popup DEBUG] translatePage: Active tab found:', tab.id, tab.url);
+
+      const translationConfig = {
+        llmUrl: this.state.llmUrl,
+        model: this.state.model,
+        targetLanguage: this.state.targetLanguage === 'Custom' ?
+          this.state.customLanguage : this.state.targetLanguage
+      };
+      console.log('[LocalLLMTranslator Popup DEBUG] translatePage: Injecting content script with config:', JSON.stringify(translationConfig, null, 2));
       
       // Inject content script and start translation
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: this.initializeTranslation, // This is a global function in content.js
-        args: [{
-          llmUrl: this.state.llmUrl,
-          model: this.state.model,
-          targetLanguage: this.state.targetLanguage === 'Custom' ? 
-            this.state.customLanguage : this.state.targetLanguage
-        }]
+        args: [translationConfig]
       });
+      console.log('[LocalLLMTranslator Popup DEBUG] translatePage: Content script injected and initializeTranslation called.');
 
       // Listen for progress updates
       this.listenForProgress(tab.id);
 
     } catch (error) {
-      console.error('Translation error:', error);
+      console.error('[LocalLLMTranslator Popup DEBUG] translatePage: Translation error:', error);
       this.setState({ 
         isTranslating: false,
         status: { type: 'error', message: 'Translation failed: ' + error.message },
@@ -221,66 +258,87 @@ class TranslatorPopup extends Component {
   }
 
   listenForProgress(tabId) {
+    console.log('[LocalLLMTranslator Popup DEBUG] listenForProgress: Setting up listener for tabId:', tabId);
     // Remove existing listener if any, to avoid duplicates
     if (this.messageListener && chrome.runtime.onMessage.hasListener(this.messageListener)) {
+      console.log('[LocalLLMTranslator Popup DEBUG] listenForProgress: Removing existing message listener.');
       chrome.runtime.onMessage.removeListener(this.messageListener);
     }
 
     this.messageListener = (message, sender) => {
+      console.log('[LocalLLMTranslator Popup DEBUG] listenForProgress: Message received:', JSON.stringify(message, null, 2), 'Sender:', sender);
       // Ensure message is from the content script of the tab we are translating
       if (sender.tab && sender.tab.id !== tabId && message.type !== 'TRANSLATION_ERROR_GLOBAL') { // TRANSLATION_ERROR_GLOBAL could be from background
-          // console.log("Popup: Ignoring message from other tab", sender.tab.id, message);
+          console.log("[LocalLLMTranslator Popup DEBUG] listenForProgress: Ignoring message from other tab", sender.tab.id, message.type);
           return true;
       }
 
       if (message.type === 'TRANSLATION_PROGRESS') {
+        console.log('[LocalLLMTranslator Popup DEBUG] listenForProgress: TRANSLATION_PROGRESS received:', message.progress, message.message);
         this.setState({ 
           progress: message.progress,
           status: { type: 'info', message: message.message }
         });
       } else if (message.type === 'TRANSLATION_COMPLETE') {
+        console.log('[LocalLLMTranslator Popup DEBUG] listenForProgress: TRANSLATION_COMPLETE received.');
         this.setState({ 
           isTranslating: false,
           progress: 100,
           status: { type: 'success', message: 'Translation completed!' },
           showStopButton: false
         });
-        if (this.messageListener) chrome.runtime.onMessage.removeListener(this.messageListener);
+        if (this.messageListener) {
+          console.log('[LocalLLMTranslator Popup DEBUG] listenForProgress: Removing listener after TRANSLATION_COMPLETE.');
+          chrome.runtime.onMessage.removeListener(this.messageListener);
+        }
       } else if (message.type === 'TRANSLATION_ERROR') {
+        console.error('[LocalLLMTranslator Popup DEBUG] listenForProgress: TRANSLATION_ERROR received:', message.error);
         this.setState({ 
           isTranslating: false,
           status: { type: 'error', message: message.error },
           showStopButton: false
         });
-        if (this.messageListener) chrome.runtime.onMessage.removeListener(this.messageListener);
+        if (this.messageListener) {
+          console.log('[LocalLLMTranslator Popup DEBUG] listenForProgress: Removing listener after TRANSLATION_ERROR.');
+          chrome.runtime.onMessage.removeListener(this.messageListener);
+        }
       }
       return true; // Keep channel open for other listeners
     };
 
     chrome.runtime.onMessage.addListener(this.messageListener);
+    console.log('[LocalLLMTranslator Popup DEBUG] listenForProgress: New message listener added.');
   }
 
   // This function is executed in the context of the content script
   initializeTranslation(config) {
+    // This log will appear in the content script's console, not the popup's.
+    // console.log('[LocalLLMTranslator Content DEBUG] initializeTranslation called with config:', config);
     window.startTranslation(config);
   }
 
   async revertTranslation() {
+    console.log('[LocalLLMTranslator Popup DEBUG] revertTranslation: Called.');
     try {
+      console.log('[LocalLLMTranslator Popup DEBUG] revertTranslation: Querying for active tab.');
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab || !tab.id) {
+        console.error("[LocalLLMTranslator Popup DEBUG] revertTranslation: Could not get active tab information for revert.");
         throw new Error("Could not get active tab information for revert.");
       }
+      console.log('[LocalLLMTranslator Popup DEBUG] revertTranslation: Active tab found:', tab.id, tab.url, 'Executing revert script.');
       
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: () => window.revertTranslation && window.revertTranslation()
       });
+      console.log('[LocalLLMTranslator Popup DEBUG] revertTranslation: Revert script executed.');
 
       this.setState({ 
         status: { type: 'success', message: 'Page reverted to original!' }
       });
     } catch (error) {
+      console.error('[LocalLLMTranslator Popup DEBUG] revertTranslation: Failed to revert page:', error);
       this.setState({ 
         status: { type: 'error', message: 'Failed to revert page: ' + error.message }
       });
@@ -288,24 +346,28 @@ class TranslatorPopup extends Component {
   }
 
   async stopTranslation() {
-    console.log("Stop translation button clicked");
+    console.log("[LocalLLMTranslator Popup DEBUG] stopTranslation: Stop translation button clicked");
     this.setState({
       status: { type: 'info', message: 'Attempting to stop translation...' },
       // isTranslating: false, // Keep true until confirmed stopped by content script or timeout
       showStopButton: false // Hide stop button immediately to prevent multiple clicks
     });
+    console.log('[LocalLLMTranslator Popup DEBUG] stopTranslation: State updated. Attempting to send ABORT_TRANSLATION message.');
 
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (tab && tab.id) {
+        console.log('[LocalLLMTranslator Popup DEBUG] stopTranslation: Sending ABORT_TRANSLATION to tabId:', tab.id);
         chrome.tabs.sendMessage(tab.id, { type: 'ABORT_TRANSLATION' });
+        console.log('[LocalLLMTranslator Popup DEBUG] stopTranslation: ABORT_TRANSLATION message sent.');
       } else {
+        console.error("[LocalLLMTranslator Popup DEBUG] stopTranslation: Active tab not found to send abort signal.");
         throw new Error("Active tab not found to send abort signal.");
       }
       // The content script will send a TRANSLATION_ERROR message if successfully stopped.
       // Or, translation might complete before stop signal is fully processed.
     } catch (error) {
-      console.error("Error sending stop translation message:", error);
+      console.error("[LocalLLMTranslator Popup DEBUG] stopTranslation: Error sending stop translation message:", error);
       this.setState({
         status: { type: 'error', message: 'Error trying to stop: ' + error.message },
         isTranslating: false, // Assume it might not have stopped
@@ -501,6 +563,8 @@ class TranslatorPopup extends Component {
 
 // Initialize popup when DOM is loaded
 document.addEventListener('DOMContentLoaded', () => {
+  console.log('[LocalLLMTranslator Popup DEBUG] DOMContentLoaded: Initializing and mounting TranslatorPopup.');
   const popup = new TranslatorPopup();
   popup.mount(document.getElementById('root'));
+  console.log('[LocalLLMTranslator Popup DEBUG] DOMContentLoaded: TranslatorPopup mounted.');
 });
