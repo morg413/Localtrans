@@ -11,16 +11,23 @@
   let nextElementId = 0; // Counter for generating unique IDs
   let translationAbortedByUser = false;
 
-  // Listen for abort message from popup
+  // Listen for messages from popup (e.g., to start translation or abort)
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.type === 'ABORT_TRANSLATION') {
+    if (message.type === 'START_TRANSLATION') {
+      console.log('[LocalLLMTranslator] DEBUG: Received START_TRANSLATION signal with config:', JSON.stringify(message.config, null, 2));
+      // Call window.startTranslation, but don't await it here as addListener expects sync true/false or a Promise for sendResponse
+      window.startTranslation(message.config);
+      // sendResponse({status: "Translation started"}); // Optional: send confirmation
+      return true; // Indicate that we might send a response asynchronously (though not strictly needed if not calling sendResponse)
+    } else if (message.type === 'ABORT_TRANSLATION') {
       console.log('[LocalLLMTranslator] DEBUG: Received ABORT_TRANSLATION signal.');
       translationAbortedByUser = true;
       console.log('[LocalLLMTranslator] DEBUG: translationAbortedByUser is now true.');
-      // Optionally, send an ack back to popup if needed
-      // sendResponse({status: "Abort signal received by content script"});
+      // sendResponse({status: "Abort signal received"}); // Optional: send confirmation
+      return true;
     }
-    return true; // Keep message channel open for other listeners or async response
+    // For other message types not handled here, return undefined or false if not responding.
+    // Returning true keeps the message channel open for sendResponse, if you plan to use it.
   });
 
   // Initialize translation functionality

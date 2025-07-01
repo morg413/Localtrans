@@ -228,24 +228,24 @@ class TranslatorPopup extends Component {
       }
       console.log('[LocalLLMTranslator Popup DEBUG] translatePage: Active tab found:', tab.id, tab.url);
 
+      // Setup listener first to catch early messages
+      this.listenForProgress(tab.id);
+
       const translationConfig = {
         llmUrl: this.state.llmUrl,
         model: this.state.model,
         targetLanguage: this.state.targetLanguage === 'Custom' ?
           this.state.customLanguage : this.state.targetLanguage
       };
-      console.log('[LocalLLMTranslator Popup DEBUG] translatePage: Injecting content script with config:', JSON.stringify(translationConfig, null, 2));
       
-      // Inject content script and start translation
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: this.initializeTranslation, // This is a global function in content.js
-        args: [translationConfig]
-      });
-      console.log('[LocalLLMTranslator Popup DEBUG] translatePage: Content script injected and initializeTranslation called.');
+      console.log('[LocalLLMTranslator Popup DEBUG] translatePage: Sending START_TRANSLATION message to content script with config:', JSON.stringify(translationConfig, null, 2));
 
-      // Listen for progress updates
-      this.listenForProgress(tab.id);
+      // Send message to content script to start translation
+      await chrome.tabs.sendMessage(tab.id, {
+        type: 'START_TRANSLATION',
+        config: translationConfig
+      });
+      console.log('[LocalLLMTranslator Popup DEBUG] translatePage: START_TRANSLATION message sent.');
 
     } catch (error) {
       console.error('[LocalLLMTranslator Popup DEBUG] translatePage: Translation error:', error);
@@ -308,13 +308,6 @@ class TranslatorPopup extends Component {
 
     chrome.runtime.onMessage.addListener(this.messageListener);
     console.log('[LocalLLMTranslator Popup DEBUG] listenForProgress: New message listener added.');
-  }
-
-  // This function is executed in the context of the content script
-  initializeTranslation(config) {
-    // This log will appear in the content script's console, not the popup's.
-    // console.log('[LocalLLMTranslator Content DEBUG] initializeTranslation called with config:', config);
-    window.startTranslation(config);
   }
 
   async revertTranslation() {
