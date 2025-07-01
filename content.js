@@ -279,7 +279,7 @@ ${text}`;
     // Try different API formats based on the URL
     let response;
     let apiType = 'Unknown';
-    const FETCH_TIMEOUT = 30000; // 30 seconds timeout
+    const FETCH_TIMEOUT = 180000; // 3 minutes timeout
     
     console.log('[LocalLLMTranslator] DEBUG: translateText: Preparing fetch request...');
     const controller = new AbortController();
