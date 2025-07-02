@@ -332,7 +332,12 @@ ${text}`;
         } catch (e) {
           // Not JSON or unexpected structure, stick with truncated raw text
         }
-        throw new Error(`Translation API error: ${response.status} ${response.statusText}. Detail: ${detail}`);
+
+        let errorMessage = `Translation API error: ${response.status} ${response.statusText}. Detail: ${detail}`;
+        if (response.status === 403 && apiType === 'Ollama') {
+          errorMessage += "\n\nA 403 error from Ollama can indicate network issues (like a proxy or firewall blocking the request), or a misconfiguration of the Ollama server (e.g., `OLLAMA_ORIGINS` not set correctly if accessing from a non-standard host, or an unexpected authentication layer). Please check your network and Ollama server setup.";
+        }
+        throw new Error(errorMessage);
       }
     } catch (error) {
       clearTimeout(timeoutId); // Clear timeout if fetch itself throws an error (e.g., network error, aborted)
@@ -340,8 +345,14 @@ ${text}`;
         console.error('[LocalLLMTranslator] DEBUG: translateText: Fetch aborted due to timeout.');
         throw new Error(`Translation request timed out after ${FETCH_TIMEOUT / 1000} seconds.`);
       }
+      // If it's not an AbortError, and we haven't already thrown a custom error from response.ok check
+      // It might be a network error before even getting a response.
       console.error(`[LocalLLMTranslator] DEBUG: translateText: Fetch error for ${apiType} API:`, error);
-      throw error; // Re-throw other errors
+      // Ensure we don't wrap an already enhanced error
+      if (error.message && error.message.startsWith('Translation API error:')) {
+        throw error;
+      }
+      throw new Error(`Network error during translation request to ${apiType} API: ${error.message}`);
     }
 
     const responseText = await response.text();
