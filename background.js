@@ -108,7 +108,11 @@ ${text}`;
           detail = errorJson.message;
         }
       } catch (e) { /* Not JSON, use raw snippet */ }
-      throw new Error(`Translation API error: ${response.status} ${response.statusText}. Detail: ${detail}`);
+      let errorMessage = `Translation API error: ${response.status} ${response.statusText}. Detail: ${detail}`;
+      if (response.status === 403 && (config.llmUrl.includes('localhost:11434') || config.llmUrl.includes('ollama'))) {
+        errorMessage += "\n\nA 403 error from Ollama can indicate network issues (like a proxy or firewall blocking the request), or a misconfiguration of the Ollama server (e.g., `OLLAMA_ORIGINS` not set correctly if accessing from a non-standard host, or an unexpected authentication layer). Please check your network and Ollama server setup.";
+      }
+      throw new Error(errorMessage);
     }
 
     const responseText = await response.text();
